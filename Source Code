@@ -1,0 +1,153 @@
+pip install scikit-surprise pandas numpy matplotlib seaborn
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from surprise import Dataset, Reader, KNNBasic, SVD
+from surprise.model_selection import train_test_split
+from surprise import accuracy 
+# Load your Excel dataset
+df = pd.read_csv('C:/Users/nithi/OneDrive/Desktop/netflix_titles.csv')  # Replace with your file path
+
+# Display first 5 rows
+print("Dataset Preview:")
+display(df.head())
+# Basic info
+print("\nDataset Info:")
+print(df.info())
+
+# Check for missing values
+print("\nMissing Values:")
+print(df.isnull().sum())
+# Handle missing values (example: fill director with 'Unknown')
+df['director'].fillna('Unknown', inplace=True)
+df['cast'].fillna('Unknown', inplace=True)
+
+# Convert 'listed_in' (genres) into list format
+df['genres'] = df['listed_in'].apply(lambda x: x.split(', '))
+
+# Create a unique list of all genres
+all_genres = set()
+for genres in df['genres']:
+    all_genres.update(genres)
+all_genres = list(all_genres)
+
+print(f"Total unique genres: {len(all_genres)}")
+# Simulate user ratings (in real scenario, this would come from user data)
+np.random.seed(42)
+num_users = 100
+user_ids = ['U' + str(i) for i in range(1, num_users+1)]
+movie_ids = df['show_id'].tolist()
+
+# Generate random ratings (1-5) for user-movie pairs
+ratings_data = []
+for user in user_ids:
+    num_ratings = np.random.randint(5, 20)  # Each user rates 5-20 movies
+    rated_movies = np.random.choice(movie_ids, num_ratings, replace=False)
+    for movie in rated_movies:
+        rating = np.random.randint(1, 6)
+        ratings_data.append([user, movie, rating])
+
+# Create ratings DataFrame
+ratings_df = pd.DataFrame(ratings_data, columns=['user_id', 'show_id', 'rating'])
+print("Ratings Data Preview:")
+display(ratings_df.head())
+# Merge with original movie data
+movie_ratings = pd.merge(ratings_df, df, on='show_id')
+print("Merged Data Preview:")
+display(movie_ratings.head())
+# Prepare data for Surprise library
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings_df[['user_id', 'show_id', 'rating']], reader)
+
+# Split into train and test sets
+trainset, testset = train_test_split(data, test_size=0.25, random_state=42)
+
+# Train KNN model (user-based collaborative filtering)
+knn_model = KNNBasic(sim_options={'name': 'cosine', 'user_based': True})
+knn_model.fit(trainset)
+
+# Train SVD model (matrix factorization)
+svd_model = SVD()
+svd_model.fit(trainset)
+
+# Evaluate models
+knn_predictions = knn_model.test(testset)
+svd_predictions = svd_model.test(testset)
+
+print("KNN RMSE:", accuracy.rmse(knn_predictions))
+print("SVD RMSE:", accuracy.rmse(svd_predictions))
+def recommend_movies(user_id, model, n=5):
+    # Get list of all movie IDs
+    all_movies = df['show_id'].unique()
+    
+    # Get movies already rated by the user
+    rated_movies = ratings_df[ratings_df['user_id'] == user_id]['show_id'].values
+    
+    # Predict ratings for unrated movies
+    recommendations = []
+    for movie in all_movies:
+        if movie not in rated_movies:
+            pred = model.predict(user_id, movie)
+            movie_info = df[df['show_id'] == movie].iloc[0]
+            recommendations.append({
+                'title': movie_info['title'],
+                'predicted_rating': pred.est,
+                'genres': movie_info['listed_in'],
+                'director': movie_info['director'],
+                'year': movie_info['release_year']
+            })
+    
+    # Sort by predicted rating (descending)
+    recommendations.sort(key=lambda x: x['predicted_rating'], reverse=True)
+    return pd.DataFrame(recommendations[:n])
+
+# Example: Recommend for user 'U5'
+print("Recommendations for User U5:")
+display(recommend_movies('U5', svd_model))
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+
+# Create TF-IDF matrix of movie descriptions
+tfidf = TfidfVectorizer(stop_words='english')
+df['description'] = df['description'].fillna('')
+tfidf_matrix = tfidf.fit_transform(df['description'])
+
+# Compute cosine similarity
+cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+
+# Function for content-based recommendations
+def content_recommendations(title, n=5):
+    idx = df[df['title'] == title].index[0]
+    sim_scores = list(enumerate(cosine_sim[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = sim_scores[1:n+1]  # Skip the movie itself
+    movie_indices = [i[0] for i in sim_scores]
+    return df.iloc[movie_indices][['title', 'director', 'listed_in', 'release_year']]
+
+# Example: Get similar movies to "Inception"
+print("\nContent-Based Recommendations:")
+display(content_recommendations("Inception"))  # Replace with a movie in your dataset
+def hybrid_recommendations(user_id, title, n=5):
+    # Content-based filtering
+    content_recs = content_recommendations(title, n*2)
+    
+    # Collaborative filtering predictions
+    hybrid_recs = []
+    for _, row in content_recs.iterrows():
+        movie_id = row['show_id']
+        pred = svd_model.predict(user_id, movie_id)
+        hybrid_recs.append({
+            'title': row['title'],
+            'combined_score': pred.est * 0.7 + row['similarity'] * 0.3,  # Weighted combination
+            'director': row['director'],
+            'genres': row['listed_in']
+        })
+    
+    # Sort and return top recommendations
+    hybrid_recs.sort(key=lambda x: x['combined_score'], reverse=True)
+    return pd.DataFrame(hybrid_recs[:n])
+
+# Example: Hybrid recommendations for user 'U10' who liked "The Dark Knight"
+print("\nHybrid Recommendations:")
+display(hybrid_recommendations('U10', "The Dark Knight"))
